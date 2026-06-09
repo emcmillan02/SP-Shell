@@ -16,6 +16,87 @@
 
 const char *ENV_VARIABLE = "PATH";
 
+/** list **/
+
+typedef struct Job{
+    int jNum;
+    pid_t pid;
+    char* cmd;
+    char* status;
+    struct Job *next;
+} Job;
+
+typedef struct List{
+    Job *head;
+    Job *tail;
+    size_t size;
+} List;
+
+static List *jobList = NULL;
+
+List *initList(){
+    List *list = malloc(sizeof(List));
+    if (list == NULL) {
+        fprintf(stderr, "Error creating list\n");
+        return NULL;
+    }
+    list->head = NULL;
+    list->tail = NULL;
+    list->size = 0;
+    return list;
+}
+
+void appendList(List *list, int jNum, pid_t pid, char *cmd, char *status){
+    Job *newJob = malloc(sizeof(Job));
+    if (newJob == NULL) {
+        fprintf(stderr, "Error appending list\n");
+        return;
+    }
+
+    newJob->jNum = jNum;
+    newJob->pid = pid;
+    newJob->cmd = strdup(cmd);
+    newJob->status = strdup(status);
+    newJob->next = NULL;
+
+    if (list->head == NULL) {
+        list->head = newJob;
+        list->tail = newJob;
+        list->head = list->tail;
+    } else {
+        list->tail->next = newJob;
+        list->tail = newJob;
+    }
+
+    list->size++;
+}
+
+void freeList(List *list){
+    Job *next = list->head;
+    Job *toFree = NULL;
+    while (next != NULL) {
+        toFree = next;
+        next = next->next;
+        free(toFree->cmd);
+        free(toFree->status);
+        free(toFree);
+    }
+    free(list);
+}
+
+void shlUpdateJobs(List *list) {
+    Job *iter = list->head;
+    while (iter != NULL) {
+        int status;
+        pid_t result = waitpid(iter->pid, &status, WNOHANG);
+        if (result > 0 && (WIFEXITED(status) || WIFSIGNALED(status))) {
+            free(iter->status);
+            iter->status = strdup("Done");
+        }
+        iter = iter->next;
+    }
+}
+
 /** prototypes **/
 
 int shlRun(char** args);
@@ -29,6 +110,7 @@ int shlType(char** args);
 int shlPwd(char** args);
 int shlCd(char** args);
 int shlHistory(char** args);
+int shlJobs(char **args);
 
 /** builtin commands **/
 
@@ -41,7 +123,8 @@ char *builtinStr[] = {
     "type",
     "pwd",
     "cd",
-    "history"
+    "history",
+    "jobs"
 };
 
 char *autocompleteStr[] = {
@@ -51,7 +134,8 @@ char *autocompleteStr[] = {
     "type",
     "pwd",
     "cd",
-    "history"
+    "history",
+    "jobs"
 };
 
 int (*builtinFunc[]) (char **) = {
@@ -61,7 +145,8 @@ int (*builtinFunc[]) (char **) = {
     &shlType,
     &shlPwd,
     &shlCd,
-    &shlHistory
+    &shlHistory,
+    &shlJobs
 };
 
 int shlNumBuiltin(){
@@ -216,7 +301,111 @@ int shlHistory(char **args) {
     return 1;
 }
 
+int shlJobs(char **args) {
+    (void)args;
+    shlUpdateJobs(jobList);
+
+    Job *iter = jobList->head;
+    size_t pos = 1;
+    size_t size = jobList->size;
+
+    while (iter != NULL) {
+        char marker;
+        if      (pos == size)     marker = '+';
+        else if (pos == size - 1) marker = '-';
+        else                      marker = ' ';
+
+        printf("[%d]%c  %-12s %s\n", iter->jNum, marker, iter->status, iter->cmd);
+        iter = iter->next;
+        pos++;
+    }
+
+    Job **pp = &jobList->head;
+    while (*pp != NULL) {
+        Job *cur = *pp;
+        if (strcmp(cur->status, "Done") == 0) {
+            *pp = cur->next;
+            free(cur->cmd);
+            free(cur->status);
+            free(cur);
+            jobList->size--;
+        } else {
+            pp = &(*pp)->next;
+        }
+    }
+    jobList->tail = NULL;
+    Job *iter2 = jobList->head;
+    while (iter2 != NULL) {
+        jobList->tail = iter2;
+        iter2 = iter2->next;
+    }
+
+    return 1;
+}
+
 /** utilities **/
+
+int shlNextJobNum(List *list) {
+    int n = 1;
+    while (1) {
+        int taken = 0;
+        Job *iter = list->head;
+        while (iter != NULL) {
+            if (iter->jNum == n) { taken = 1; break; }
+            iter = iter->next;
+        }
+        if (!taken) return n;
+        n++;
+    }
+}
+
+void shlReapJobs(List *list) {
+    Job *iter = list->head;
+    while (iter != NULL) {
+        int status;
+        pid_t result = waitpid(iter->pid, &status, WNOHANG);
+        if (result > 0 && (WIFEXITED(status) || WIFSIGNALED(status))) {
+            free(iter->status);
+            iter->status = strdup("Done");
+        }
+        iter = iter->next;
+    }
+
+    Job **pp = &list->head;
+    while (*pp != NULL) {
+        Job *cur = *pp;
+        if (strcmp(cur->status, "Done") == 0) {
+            printf("[%d]+  Done                 %s\n", cur->jNum, cur->cmd);
+            *pp = cur->next;
+            free(cur->cmd);
+            free(cur->status);
+            free(cur);
+            list->size--;
+        } else {
+            pp = &(*pp)->next;
+        }
+    }
+
+    list->tail = NULL;
+    Job *iter2 = list->head;
+    while (iter2 != NULL) {
+        list->tail = iter2;
+        iter2 = iter2->next;
+    }
+}
+
+char *argsToCmd(char **args) {
+    size_t len = 0;
+    for (int i = 0; args[i]; i++) len += strlen(args[i]) + 1;
+    char *cmd = malloc(len + 1);
+    if (!cmd) return NULL;
+    cmd[0] = '\0';
+    for (int i = 0; args[i]; i++) {
+        strcat(cmd, args[i]);
+        if (args[i + 1]) strcat(cmd, " ");
+    }
+    return cmd;
+}
 
 int shlRedir(char **args) {
     for(int i = 0; args[i] != NULL; i++) {
@@ -320,71 +509,72 @@ int shlExecutePipeline(char ***cmds, int ncmds) {
 
 /** autocompletion **/
 
-char *autocompGen(const char *text, int state){
+char *autocompGen(const char *text, int state) {
     static int index;
     static int len;
     const char *name;
-
     static DIR *dir;
     static char *path;
     static char *env_p;
     static char path_copy[4096];
     static char *saveptr;
+    static DIR *cwd_dir;
 
     if (state == 0) {
         index = 0;
         len = strlen(text);
-    
 
-        if(dir){
-            closedir(dir);
-            dir = NULL;
-        }
+        if (dir) { closedir(dir); dir = NULL; }
+        if (cwd_dir) { closedir(cwd_dir); cwd_dir = NULL; }  // NEW
 
         env_p = getenv(ENV_VARIABLE);
         saveptr = NULL;
-
-        if(env_p){
+        if (env_p) {
             strncpy(path_copy, env_p, sizeof(path_copy) - 1);
             path_copy[sizeof(path_copy) - 1] = '\0';
             path = strtok_r(path_copy, ":", &saveptr);
-        }else{
+        } else {
             path = NULL;
         }
+
+        cwd_dir = opendir(".");  // NEW: open CWD for file matching
     }
 
-    // shell builtins //
-
-    while ((name = builtinStr[index++])) {
-        if (strncmp(name, text, len) == 0)  return strdup(name);
-    }
-
-    // other excutables//
+    while ((name = builtinStr[index++])) if (strncmp(name, text, len) == 0) return strdup(name);
 
     while (path) {
         if (!dir) {
             dir = opendir(path);
-            if (!dir) {
-                path = strtok_r(NULL, ":", &saveptr);
-                continue;
-            }
+            if (!dir) { path = strtok_r(NULL, ":", &saveptr); continue; }
         }
-
         struct dirent *entry;
         while ((entry = readdir(dir))) {
-            if (strncmp(entry->d_name, text, strlen(text)) != 0) continue;
-
+            if (strncmp(entry->d_name, text, len) != 0) continue;
             char fullpath[PATH_MAX];
             snprintf(fullpath, sizeof(fullpath), "%s/%s", path, entry->d_name);
-
             if (access(fullpath, X_OK) == 0) return strdup(entry->d_name);
-        
         }
-
         closedir(dir);
         dir = NULL;
         path = strtok_r(NULL, ":", &saveptr);
-    }    
+    }
+
+    if (cwd_dir) {
+        struct dirent *entry;
+        while ((entry = readdir(cwd_dir))) {
+            // Skip hidden files unless the user typed a leading dot
+            if (entry->d_name[0] == '.' && (len == 0 || text[0] != '.'))
+                continue;
+            if (strncmp(entry->d_name, text, len) == 0) {
+                closedir(cwd_dir);  // will be NULL-guarded on next call
+                cwd_dir = NULL;
+                return strdup(entry->d_name);
+            }
+        }
+        closedir(cwd_dir);
+        cwd_dir = NULL;
+    }
+
     return NULL;
 }
 
@@ -400,18 +590,18 @@ char** shlAutocomplete(const char* input, int start, int end){
 
 /** input processing **/
 
-char *shlReadLine(){
+char *shlReadLine() {
     rl_attempted_completion_function = shlAutocomplete;
-    char* line = readline("$ ");
-    if(!line){
+
+    shlReapJobs(jobList);
+
+    char *line = readline("$ ");
+    if (!line) {
         printf("\n");
         exit(EXIT_SUCCESS);
     }
 
-    if (*line) { 
-        add_history(line);
-    }
-
+    if (*line) add_history(line);
     return line;
 }
 
@@ -510,24 +700,41 @@ char** shlSplitLine(char* line) {
 
 // non-system //
 
-int shlLaunch(char **args){
+int shlLaunch(char **args, int background) {
     pid_t pid, wpid;
     int status;
 
+    int argc = 0;
+    while (args[argc]) argc++;
+    if (argc > 0 && strcmp(args[argc - 1], "&") == 0) {
+        args[argc - 1] = NULL;
+        background = 1;
+    }
+
+    char *cmd = background ? argsToCmd(args) : NULL;
+
     pid = fork();
-    if(pid == 0){
-        if(shlRedir(args) < 0){
-            exit(EXIT_FAILURE);
-        }
+    if (pid == 0) {
+        if (background) setpgid(0, 0);
+        if (shlRedir(args) < 0) exit(EXIT_FAILURE);
         execvp(args[0], args);
         printf("%s: command not found\n", args[0]);
         exit(EXIT_FAILURE);
-    }else if(pid < 0){
+    } else if (pid < 0) {
         perror("shl");
-    }else{
-        do{
-            wpid = waitpid(pid, &status, WUNTRACED);
-        }while(!WIFEXITED(status) && !WIFSIGNALED(status));
+        free(cmd);
+    } else {
+        if (background) {
+            int jobId = shlNextJobNum(jobList);
+            appendList(jobList, jobId, pid, cmd, "Running");  // ADD
+            printf("[%d] %d\n", jobId, pid);
+            while (waitpid(-1, &status, WNOHANG) > 0);
+        } else {
+            do {
+                wpid = waitpid(pid, &status, WUNTRACED);
+            } while (!WIFEXITED(status) && !WIFSIGNALED(status));
+        }
+        free(cmd);
     }
     return 1;
 }
@@ -537,11 +744,14 @@ int shlLaunch(char **args){
 int shlExecute(char **args) {
     if (!args[0]) return 1;
 
+    int argc = 0;
+    while (args[argc]) argc++;
+    int background = (argc > 0 && strcmp(args[argc - 1], "&") == 0);
+    if (background) args[--argc] = NULL;
+
     char **cmds[64];
     int ncmds = 0;
-
     cmds[ncmds++] = args;
-
     for (int i = 0; args[i]; i++) {
         if (strcmp(args[i], "|") == 0) {
             args[i] = NULL;
@@ -550,14 +760,9 @@ int shlExecute(char **args) {
     }
 
     if (ncmds == 1) {
-
         int saved_stdout = dup(STDOUT_FILENO);
         int saved_stderr = dup(STDERR_FILENO);
-
-        if (saved_stdout < 0 || saved_stderr < 0) {
-            perror("dup");
-            return 1;
-        }
+        if (saved_stdout < 0 || saved_stderr < 0) { perror("dup"); return 1; }
 
         if (shlRedir(cmds[0]) < 0) {
             dup2(saved_stdout, STDOUT_FILENO);
@@ -570,22 +775,19 @@ int shlExecute(char **args) {
         for (int i = 0; i < shlNumBuiltin(); i++) {
             if (strcmp(args[0], builtinStr[i]) == 0) {
                 int status = (*builtinFunc[i])(cmds[0]);
-
                 dup2(saved_stdout, STDOUT_FILENO);
                 dup2(saved_stderr, STDERR_FILENO);
                 close(saved_stdout);
                 close(saved_stderr);
-
                 return status;
             }
         }
-         int status = shlLaunch(cmds[0]);
 
+        int status = shlLaunch(cmds[0], background); 
         dup2(saved_stdout, STDOUT_FILENO);
         dup2(saved_stderr, STDERR_FILENO);
         close(saved_stdout);
         close(saved_stderr);
-
         return status;
     }
 
@@ -623,15 +825,14 @@ void shlLoop(){
     
 }
 
-
 int main(int argc, char *argv[]) {
   // Flush after every printf
-  setbuf(stdout, NULL);
+    setbuf(stdout, NULL);
+    jobList = initList();
+    read_history(getenv("HISTFILE"));
+    appendidx = history_length;
 
-  read_history(getenv("HISTFILE"));
-  appendidx = history_length;
-
-  shlLoop();
-
-  return 0;
+    shlLoop();
+    freeList(jobList);
+    return 0;
 }
