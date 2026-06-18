@@ -26,16 +26,16 @@ typedef struct Job{
     struct Job *next;
 } Job;
 
-typedef struct List{
+typedef struct JobList{
     Job *head;
     Job *tail;
     size_t size;
-} List;
+} JobList;
 
-static List *jobList = NULL;
+static JobList *jobList = NULL;
 
-List *initList(){
-    List *list = malloc(sizeof(List));
+JobList *initJList(){
+    JobList *list = malloc(sizeof(JobList));
     if (list == NULL) {
         fprintf(stderr, "Error creating list\n");
         return NULL;
@@ -46,7 +46,7 @@ List *initList(){
     return list;
 }
 
-void appendList(List *list, int jNum, pid_t pid, char *cmd, char *status){
+void appendJList(JobList *list, int jNum, pid_t pid, char *cmd, char *status){
     Job *newJob = malloc(sizeof(Job));
     if (newJob == NULL) {
         fprintf(stderr, "Error appending list\n");
@@ -71,7 +71,7 @@ void appendList(List *list, int jNum, pid_t pid, char *cmd, char *status){
     list->size++;
 }
 
-void freeList(List *list){
+void freeJList(JobList *list){
     Job *next = list->head;
     Job *toFree = NULL;
     while (next != NULL) {
@@ -84,7 +84,7 @@ void freeList(List *list){
     free(list);
 }
 
-void shlUpdateJobs(List *list) {
+void shlUpdateJobs(JobList *list) {
     Job *iter = list->head;
     while (iter != NULL) {
         int status;
@@ -97,6 +97,207 @@ void shlUpdateJobs(List *list) {
     }
 }
 
+/** programmable completions **/
+
+typedef struct Completion {
+    char* name;
+    char* path;
+    struct Completion *next;
+} Completion;
+
+typedef struct CompDictionary {
+    Completion *head;
+    Completion *tail;
+    size_t size;
+} CompDictionary;
+
+static CompDictionary *compDict = NULL;
+
+CompDictionary *initDict(){
+    CompDictionary *dict = malloc(sizeof(CompDictionary));
+    if (dict == NULL) {
+        fprintf(stderr, "Error creating dictionary\n");
+        return NULL;
+    }
+    dict->head = NULL;
+    dict->tail = NULL;
+    dict->size = 0;
+    return dict;
+}
+
+void appendDict(CompDictionary *dict, char* name, char* path){
+    Completion *newComp = malloc(sizeof(Completion));
+    if (newComp == NULL) {
+        fprintf(stderr, "Error appending dictionary\n");
+        return;
+    }
+
+    newComp->name = name;
+    newComp->path = path;
+
+    if (dict->head == NULL) {
+        dict->head = newComp;
+        dict->tail = newComp;
+        dict->head = dict->tail;
+    } else {
+        dict->tail->next = newComp;
+        dict->tail = newComp;
+    }
+
+    dict->size++;
+}
+
+void freeDict(CompDictionary *dict){
+    Completion *next = dict->head;
+    Completion *toFree = NULL;
+    while (next != NULL) {
+        toFree = next;
+        next = next->next;
+        free(toFree->name);
+        free(toFree->path);
+        free(toFree);
+    }
+    free(dict);
+}
+
+/** shell variables **/
+
+typedef struct Variable{
+    char* name;
+    char* value;
+    struct Variable *next;    
+} Variable;
+
+typedef struct VarList{
+    Variable* head;
+    Variable* tail;
+    size_t size;
+} VarList;
+
+static VarList *varList = NULL;
+
+VarList *initVList(){
+    VarList *dict = malloc(sizeof(VarList));
+    if (dict == NULL) {
+        fprintf(stderr, "Error creating list\n");
+        return NULL;
+    }
+    dict->head = NULL;
+    dict->tail = NULL;
+    dict->size = 0;
+    return dict;
+}
+
+void appendVList(VarList *list, char *name, char *value) {
+    Variable *var = list->head;
+
+    while (var != NULL) {
+        if (strcmp(var->name, name) == 0) {
+            free(var->value);
+            var->value = strdup(value);
+            return;
+        }
+        var = var->next;
+    }
+
+    Variable *newVar = malloc(sizeof(Variable));
+    if (newVar == NULL) {
+        fprintf(stderr, "Error appending list\n");
+        return;
+    }
+    newVar->name  = strdup(name);
+    newVar->value = strdup(value);
+    newVar->next  = NULL;
+
+    if (list->head == NULL) {
+        list->head = newVar;
+        list->tail = newVar;
+    } else {
+        list->tail->next = newVar;
+        list->tail = newVar;
+    }
+    list->size++;
+}
+
+void freeVList(VarList *list){
+    Variable *next = list->head;
+    Variable *toFree = NULL;
+    while (next != NULL) {
+        toFree = next;
+        next = next->next;
+        free(toFree->name);
+        free(toFree->value);
+        free(toFree);
+    }
+    free(list);
+}
+
+int isValidIdentifier(const char *name) {
+    if (!name || (!isalpha((unsigned char)name[0]) && name[0] != '_'))
+        return 0;
+    for (int i = 1; name[i]; i++) {
+        if (!isalnum((unsigned char)name[i]) && name[i] != '_')
+            return 0;
+    }
+    return 1;
+}
+
+char *expandVar(const char *word) {
+    size_t cap = 128;
+    size_t len = 0;
+    char *out = malloc(cap);
+    if (!out) return NULL;
+
+    const char *p = word;
+    while (*p) {
+        if (*p == '$' && p[1] == '{') {
+            p += 2;
+            char name[256];
+            int nlen = 0;
+            while (*p && *p != '}' && nlen < 255) name[nlen++] = *p++;
+            name[nlen] = '\0';
+            if (*p == '}') p++;
+
+            const char *val = "";
+            Variable *var = varList->head;
+            while (var != NULL) {
+                if (strcmp(var->name, name) == 0) { val = var->value; break; }
+                var = var->next;
+            }
+
+            size_t vlen = strlen(val);
+            while (len + vlen + 1 >= cap) { cap *= 2; out = realloc(out, cap); }
+            memcpy(out + len, val, vlen);
+            len += vlen;
+
+        } else if (*p == '$' && (isalpha((unsigned char)p[1]) || p[1] == '_')) {
+            p++;
+            char name[256];
+            int nlen = 0;
+            while (*p && (isalnum((unsigned char)*p) || *p == '_') && nlen < 255) name[nlen++] = *p++;
+            name[nlen] = '\0';
+
+            const char *val = "";
+            Variable *var = varList->head;
+            while (var != NULL) {
+                if (strcmp(var->name, name) == 0) { val = var->value; break; }
+                var = var->next;
+            }
+
+            size_t vlen = strlen(val);
+            while (len + vlen + 1 >= cap) { cap *= 2; out = realloc(out, cap); }
+            memcpy(out + len, val, vlen);
+            len += vlen;
+
+        } else {
+            if (len + 2 >= cap) { cap *= 2; out = realloc(out, cap); }
+            out[len++] = *p++;
+        }
+    }
+    out[len] = '\0';
+    return out;
+}
+
 /** prototypes **/
 
 int shlRun(char** args);
@@ -106,11 +307,13 @@ int shlRun(char** args);
 int shlExit(char **args);
 int shlEcho(char **args);
 int shlHelp(char **args);
-int shlType(char** args);
-int shlPwd(char** args);
-int shlCd(char** args);
-int shlHistory(char** args);
+int shlType(char **args);
+int shlPwd(char **args);
+int shlCd(char **args);
+int shlHistory(char **args);
 int shlJobs(char **args);
+int shlComplete(char **args);
+int shlDeclare(char **args);
 
 /** builtin commands **/
 
@@ -124,7 +327,9 @@ char *builtinStr[] = {
     "pwd",
     "cd",
     "history",
-    "jobs"
+    "jobs",
+    "complete",
+    "declare"
 };
 
 char *autocompleteStr[] = {
@@ -135,7 +340,9 @@ char *autocompleteStr[] = {
     "pwd",
     "cd",
     "history",
-    "jobs"
+    "jobs",
+    "complete",
+    "declare"
 };
 
 int (*builtinFunc[]) (char **) = {
@@ -146,7 +353,9 @@ int (*builtinFunc[]) (char **) = {
     &shlPwd,
     &shlCd,
     &shlHistory,
-    &shlJobs
+    &shlJobs,
+    &shlComplete,
+    &shlDeclare
 };
 
 int shlNumBuiltin(){
@@ -285,7 +494,6 @@ int shlHistory(char **args) {
         append_history(newEntries, args[2]);
         appendidx = history_length;
     }
-
     int n = numEntries;
     if (args[1] != NULL) {
         n = atoi(args[1]);
@@ -343,9 +551,132 @@ int shlJobs(char **args) {
     return 1;
 }
 
+int shlComplete(char **args){
+    int argc = 0;
+    while (args[argc]) argc++;
+
+    char* flag = args[1];
+
+    Completion *comp = compDict->head;
+
+    if(strcmp(flag, "-p") == 0 && argc != 3 || strcmp(flag, "-r") == 0 && argc != 3 || strcmp(flag, "-C") == 0 && argc != 4){
+        fprintf(stderr, "Syntax error: Invalid number of flags");
+        return 1;
+    }
+
+    if(strcmp(flag, "-p") == 0){
+        bool registered = false;
+        char* name = args[2];
+        if(compDict->size == 0){
+            printf("complete: %s: no completion specification\n", name);
+            return 1;
+        }
+        while(comp != NULL){
+            if(strcmp(name, comp->name) == 0){
+                printf("complete -C '%s' %s\n", comp->path, comp->name);
+                registered = true;
+                break;
+            }
+            comp = comp->next;
+        }
+        if(comp == NULL && registered == false){
+            printf("complete: %s: no completion specification\n", name);
+            return 1;
+        }
+    }else if(strcmp(flag, "-r") == 0){
+        bool found = false;
+        char* targetName = args[2];
+        Completion *targetPrev = NULL;
+        if(compDict->size == 0){
+            printf("complete: %s: no completion specification\n", targetName);
+            return 1;
+        }
+        if((strcmp(targetName, comp->name) == 0) && targetPrev == NULL){
+            compDict->head = NULL;
+            free(comp);
+            found = true;
+        }else{
+            while(comp != NULL){
+                if(strcmp(targetName, comp->name) == 0){
+                    targetPrev->next = comp->next;
+                    free(comp);
+                    found = true;
+                    break;
+                }
+                targetPrev = comp;
+                comp = comp->next;
+            }
+        }
+        if(comp == NULL && found == false){
+            printf("complete: %s: no completion specification\n", targetName);
+            return 1;
+        }
+    }else if(strcmp(flag, "-C") == 0){
+        char* name = args[3];
+        char* path = args[2];
+        appendDict(compDict, name, path);
+    }else{
+        fprintf(stderr, "Syntax error: Invalid flag: %s", flag);
+        return 1;
+    }
+    return 1;
+}
+
+int shlDeclare(char **args) {
+    int argc = 0;
+    while (args[argc]) argc++;
+
+    if (argc < 2) {
+        fprintf(stderr, "declare: usage: declare [-p] [NAME=VALUE]\n");
+        return 1;
+    }
+
+    if (strcmp(args[1], "-p") == 0) {
+        if (argc == 2) {
+            Variable *var = varList->head;
+            while (var != NULL) {
+                printf("declare -- %s=\"%s\"\n", var->name, var->value);
+                var = var->next;
+            }
+            return 1;
+        }
+
+        char *name = args[2];
+        Variable *var = varList->head;
+        while (var != NULL) {
+            if (strcmp(var->name, name) == 0) {
+                printf("declare -- %s=\"%s\"\n", var->name, var->value);
+                return 1;
+            }
+            var = var->next;
+        }
+        fprintf(stderr, "declare: %s: not found\n", name);
+        return 1;
+    }
+
+    for (int i = 1; args[i]; i++) {
+        char *eq = strchr(args[i], '=');
+        if (!eq) {
+            fprintf(stderr, "declare: %s: not a valid assignment\n", args[i]);
+            continue;
+        }
+        *eq = '\0';
+        char *name  = args[i];
+        char *value = eq + 1;
+        if (!isValidIdentifier(name)) {
+            fprintf(stderr, "declare: `%s=%s': not a valid identifier\n", name, value);
+            *eq = '=';
+            continue;
+        }
+        appendVList(varList, name, value);
+        *eq = '=';
+    }
+    return 1;
+}
+
 /** utilities **/
 
-int shlNextJobNum(List *list) {
+int shlNextJobNum(JobList *list) {
     int n = 1;
     while (1) {
         int taken = 0;
@@ -359,7 +690,7 @@ int shlNextJobNum(List *list) {
     }
 }
 
-void shlReapJobs(List *list) {
+void shlReapJobs(JobList *list) {
     Job *iter = list->head;
     while (iter != NULL) {
         int status;
@@ -509,6 +840,117 @@ int shlExecutePipeline(char ***cmds, int ncmds) {
 
 /** autocompletion **/
 
+char *progCompGen(const char *text, int state) {
+    static char **lines = NULL;
+    static int nlines = 0;
+    static int index = 0;
+    static int len;
+
+    if (state == 0) {
+        if (lines) {
+            for (int i = 0; i < nlines; i++) free(lines[i]);
+            free(lines);
+            lines = NULL;
+        }
+        nlines = 0;
+        index = 0;
+        len = strlen(text);
+
+        char linecopy[1024];
+        int point = rl_point;
+        if (point > (int)sizeof(linecopy) - 1) point = sizeof(linecopy) - 1;
+        strncpy(linecopy, rl_line_buffer, point);
+        linecopy[point] = '\0';
+
+        char *words[64];
+        int nwords = 0;
+        char *tok = strtok(linecopy, " \t");
+        while (tok && nwords < 64) {
+            words[nwords++] = tok;
+            tok = strtok(NULL, " \t");
+        }
+
+        if (nwords == 0) return NULL;
+
+        char *cmd = words[0];
+
+        char prevword[256] = "";
+        if (nwords >= 1 && strcmp(words[nwords - 1], text) == 0) {
+            if (nwords >= 2)
+                strncpy(prevword, words[nwords - 2], sizeof(prevword) - 1);
+        } else {
+            strncpy(prevword, words[nwords - 1], sizeof(prevword) - 1);
+        }
+        prevword[sizeof(prevword) - 1] = '\0';
+
+        Completion *comp = compDict->head;
+        char *path = NULL;
+        while (comp != NULL) {
+            if (strcmp(comp->name, cmd) == 0) {
+                path = comp->path;
+                break;
+            }
+            comp = comp->next;
+        }
+        if (!path) return NULL;
+
+        char comp_point_str[32];
+        snprintf(comp_point_str, sizeof(comp_point_str), "%d", rl_point);
+
+        int pipefd[2];
+        if (pipe(pipefd) < 0) return NULL;
+
+        pid_t pid = fork();
+        if (pid < 0) {
+            close(pipefd[0]);
+            close(pipefd[1]);
+            return NULL;
+        }
+
+        if (pid == 0) {
+            close(pipefd[0]);
+            dup2(pipefd[1], STDOUT_FILENO);
+            close(pipefd[1]);
+
+            setenv("COMP_LINE",  rl_line_buffer, 1);
+            setenv("COMP_POINT", comp_point_str, 1);
+
+            char *child_args[] = { path, cmd, (char *)text, prevword, NULL };
+            execvp(path, child_args);
+            _exit(1);
+        }
+
+        close(pipefd[1]);
+
+        FILE *fp = fdopen(pipefd[0], "r");
+        if (!fp) {
+            close(pipefd[0]);
+            waitpid(pid, NULL, 0);
+            return NULL;
+        }
+
+        char buf[1024];
+        int cap = 16;
+        lines = malloc(cap * sizeof(char *));
+        while (fgets(buf, sizeof(buf), fp)) {
+            size_t l = strlen(buf);
+            if (l > 0 && buf[l - 1] == '\n') buf[l - 1] = '\0';
+            if (nlines >= cap) {
+                cap *= 2;
+                lines = realloc(lines, cap * sizeof(char *));
+            }
+            lines[nlines++] = strdup(buf);
+        }
+        fclose(fp);
+        waitpid(pid, NULL, 0);
+    }
+    while (index < nlines) {
+        char *candidate = lines[index++];
+        if (strncmp(candidate, text, len) == 0) return strdup(candidate);
+    }
+    return NULL;
+}
+
 char *autocompGen(const char *text, int state) {
     static int index;
     static int len;
@@ -537,7 +979,7 @@ char *autocompGen(const char *text, int state) {
             path = NULL;
         }
 
-        cwd_dir = opendir(".");  // NEW: open CWD for file matching
+        cwd_dir = opendir(".");
     }
 
     while ((name = builtinStr[index++])) if (strncmp(name, text, len) == 0) return strdup(name);
@@ -562,11 +1004,10 @@ char *autocompGen(const char *text, int state) {
     if (cwd_dir) {
         struct dirent *entry;
         while ((entry = readdir(cwd_dir))) {
-            // Skip hidden files unless the user typed a leading dot
             if (entry->d_name[0] == '.' && (len == 0 || text[0] != '.'))
                 continue;
             if (strncmp(entry->d_name, text, len) == 0) {
-                closedir(cwd_dir);  // will be NULL-guarded on next call
+                closedir(cwd_dir); 
                 cwd_dir = NULL;
                 return strdup(entry->d_name);
             }
@@ -579,13 +1020,25 @@ char *autocompGen(const char *text, int state) {
 }
 
 char** shlAutocomplete(const char* input, int start, int end){
-    (void)start;
     (void)end;
 
-    if (start == 0)return rl_completion_matches(input, autocompGen);
+    if (start == 0) return rl_completion_matches(input, autocompGen);
+
+    char linecopy[1024];
+    strncpy(linecopy, rl_line_buffer, sizeof(linecopy) - 1);
+    linecopy[sizeof(linecopy) - 1] = '\0';
+    char *cmd = strtok(linecopy, " \t");
+
+    if (cmd) {
+        Completion *comp = compDict->head;
+        while (comp != NULL) {
+            if (strcmp(comp->name, cmd) == 0)
+                return rl_completion_matches(input, progCompGen);
+            comp = comp->next;
+        }
+    }
 
     return rl_completion_matches(input, rl_filename_completion_function);
-
 }
 
 /** input processing **/
@@ -696,6 +1149,27 @@ char** shlSplitLine(char* line) {
     return tokens;
 }
 
+void expandArgs(char **args) {
+    for (int i = 0; args[i]; i++) {
+        if (strchr(args[i], '$')) {
+            char *expanded = expandVar(args[i]);
+            free(args[i]);
+
+            if (expanded == NULL || expanded[0] == '\0') {
+                free(expanded);
+                int j = i;
+                while (args[j] != NULL) {
+                    args[j] = args[j + 1];
+                    j++;
+                }
+                i--;
+            } else {
+                args[i] = expanded;
+            }
+        }
+    }
+}
+
 /** process execution **/
 
 // non-system //
@@ -726,7 +1200,7 @@ int shlLaunch(char **args, int background) {
     } else {
         if (background) {
             int jobId = shlNextJobNum(jobList);
-            appendList(jobList, jobId, pid, cmd, "Running");  // ADD
+            appendJList(jobList, jobId, pid, cmd, "Running");  // ADD
             printf("[%d] %d\n", jobId, pid);
             while (waitpid(-1, &status, WNOHANG) > 0);
         } else {
@@ -743,6 +1217,8 @@ int shlLaunch(char **args, int background) {
 
 int shlExecute(char **args) {
     if (!args[0]) return 1;
+
+    expandArgs(args);
 
     int argc = 0;
     while (args[argc]) argc++;
@@ -828,11 +1304,15 @@ void shlLoop(){
 int main(int argc, char *argv[]) {
   // Flush after every printf
     setbuf(stdout, NULL);
-    jobList = initList();
+    jobList = initJList();
+    compDict = initDict();
+    varList = initVList();
     read_history(getenv("HISTFILE"));
     appendidx = history_length;
 
     shlLoop();
-    freeList(jobList);
+    freeJList(jobList);
+    freeDict(compDict);
+    freeVList(varList);
     return 0;
 }
